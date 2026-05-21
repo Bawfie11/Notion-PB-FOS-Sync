@@ -2,7 +2,7 @@ name: Productboard to Notion Sync
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "23 10-23,0-3 * * *"   # once an hour at :23 past
   workflow_dispatch:
 
 concurrency:
