@@ -1,0 +1,51 @@
+name: Productboard to Notion Sync
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: pb-notion-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PRODUCTBOARD_TOKEN: ${{ secrets.PRODUCTBOARD_TOKEN }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          NOTION_ROADMAP_DATA_SOURCE_ID: ${{ secrets.NOTION_ROADMAP_DATA_SOURCE_ID }}
+          NOTION_PRODUCTS_DATA_SOURCE_ID: ${{ secrets.NOTION_PRODUCTS_DATA_SOURCE_ID }}
+
+          PB_CUSTOM_FIELD_TIER_ID: ${{ secrets.PB_CUSTOM_FIELD_TIER_ID }}
+          PB_CUSTOM_FIELD_APP_APPROVAL_ID: ${{ secrets.PB_CUSTOM_FIELD_APP_APPROVAL_ID }}
+          PB_CUSTOM_FIELD_FEATURE_FLAG_ID: ${{ secrets.PB_CUSTOM_FIELD_FEATURE_FLAG_ID }}
+          PB_CUSTOM_FIELD_AI_FEATURE_ID: ${{ secrets.PB_CUSTOM_FIELD_AI_FEATURE_ID }}
+          PB_CUSTOM_FIELD_TSHIRT_SIZE_ID: ${{ secrets.PB_CUSTOM_FIELD_TSHIRT_SIZE_ID }}
+          PB_CUSTOM_FIELD_DESIGN_STATUS_ID: ${{ secrets.PB_CUSTOM_FIELD_DESIGN_STATUS_ID }}
+          PB_CUSTOM_FIELD_DESIGNER_ID: ${{ secrets.PB_CUSTOM_FIELD_DESIGNER_ID }}
+
+          DRY_RUN: "false"
+          ALLOW_CREATES: "true"
+          DESIGNER_SYNC_STRICT: "false"
+          PB_FETCH_ALL_FEATURES: "false"
+          PB_UPDATED_LOOKBACK_DAYS: "7"
+
+        run: npm run sync
