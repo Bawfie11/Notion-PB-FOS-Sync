@@ -21,6 +21,7 @@ const ROADMAP_HEALTH_DATE_COL = "Health Updated At";
 const TSHIRT_SIZE_COL = "T-Shirt Size";
 const DESIGN_STATUS_COL = "Design Status";
 const DESIGNER_COL = "Designer";
+const PI_FEATURE_COL = "P&I Feature";
 
 const TEAMS_WEBHOOK_URL =
   process.env.TEAMS_WEBHOOK_URL || process.env["TEAMS-WEBHOOK-URL"];
@@ -50,7 +51,8 @@ const CUSTOM_FIELD_NAMES = {
   aiFeature: "AI Feature",
   tshirtSize: TSHIRT_SIZE_COL,
   designStatus: DESIGN_STATUS_COL,
-  designer: DESIGNER_COL
+  designer: DESIGNER_COL,
+  piFeature: PI_FEATURE_COL
 };
 
 function boolEnv(name, defaultValue = false) {
@@ -348,9 +350,10 @@ async function validateNotionSchema() {
     "App approval",
     "Feature Flag",
     "AI Feature",
-    TSHIRT_SIZE_COL,
+   TSHIRT_SIZE_COL,
     DESIGN_STATUS_COL,
     DESIGNER_COL,
+    PI_FEATURE_COL,
     "PB_Health",
     "Latest Health Comment",
     ROADMAP_HEALTH_DATE_COL,
@@ -741,8 +744,9 @@ async function getFeatureConfigAndCustomFieldIds() {
       process.env.PB_CUSTOM_FIELD_T_SHIRT_SIZE_ID ||
       ""
     ).trim(),
-    designStatus: (process.env.PB_CUSTOM_FIELD_DESIGN_STATUS_ID || "").trim(),
-    designer: (process.env.PB_CUSTOM_FIELD_DESIGNER_ID || "").trim()
+designStatus: (process.env.PB_CUSTOM_FIELD_DESIGN_STATUS_ID || "").trim(),
+    designer: (process.env.PB_CUSTOM_FIELD_DESIGNER_ID || "").trim(),
+    piFeature: (process.env.PB_CUSTOM_FIELD_PI_FEATURE_ID || "").trim()
   };
 
   const allEnvIdsPresent = Object.values(envIds).every(Boolean);
@@ -766,8 +770,9 @@ async function getFeatureConfigAndCustomFieldIds() {
     featureFlag: envIds.featureFlag || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.featureFlag),
     aiFeature: envIds.aiFeature || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.aiFeature),
     tshirtSize: envIds.tshirtSize || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.tshirtSize),
-    designStatus: envIds.designStatus || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.designStatus),
-    designer: envIds.designer || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.designer)
+designStatus: envIds.designStatus || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.designStatus),
+    designer: envIds.designer || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.designer),
+    piFeature: envIds.piFeature || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.piFeature)
   };
 
   const missing = Object.entries(fieldIds)
@@ -971,10 +976,16 @@ function isDifferent(newProps, oldProps, featureName) {
     logs.push(`${TSHIRT_SIZE_COL}: "${oldTshirtSize}" -> "${newTshirtSize}"`);
   }
 
-  const newDesignStatus = newProps[DESIGN_STATUS_COL]?.select?.name || null;
+ const newDesignStatus = newProps[DESIGN_STATUS_COL]?.select?.name || null;
   const oldDesignStatus = oldProps[DESIGN_STATUS_COL]?.select?.name || null;
   if (newDesignStatus !== oldDesignStatus) {
     logs.push(`${DESIGN_STATUS_COL}: "${oldDesignStatus}" -> "${newDesignStatus}"`);
+  }
+
+  const newPiFeature = newProps[PI_FEATURE_COL]?.select?.name || null;
+  const oldPiFeature = oldProps[PI_FEATURE_COL]?.select?.name || null;
+  if (newPiFeature !== oldPiFeature) {
+    logs.push(`${PI_FEATURE_COL}: "${oldPiFeature}" -> "${newPiFeature}"`);
   }
 
   if (Object.prototype.hasOwnProperty.call(newProps, DESIGNER_COL)) {
@@ -1133,9 +1144,14 @@ async function buildNotionPropertiesFromPBFeature(entity, context) {
     ? { select: { name: tshirtSizeVal } }
     : { select: null };
 
-  const designStatusVal = selectDisplayValue(fields[fieldIds.designStatus]);
+const designStatusVal = selectDisplayValue(fields[fieldIds.designStatus]);
   properties[DESIGN_STATUS_COL] = designStatusVal
     ? { select: { name: designStatusVal } }
+    : { select: null };
+
+  const piFeatureVal = selectDisplayValue(fields[fieldIds.piFeature]);
+  properties[PI_FEATURE_COL] = piFeatureVal
+    ? { select: { name: piFeatureVal } }
     : { select: null };
 
   const designerPeopleProperty = await buildDesignerPeopleProperty(
@@ -1209,7 +1225,8 @@ async function main() {
     fieldIds.aiFeature,
     fieldIds.tshirtSize,
     fieldIds.designStatus,
-    fieldIds.designer
+    fieldIds.designer,
+    fieldIds.piFeature
   ].filter(Boolean);
 
   const pbFeatures = await fetchPBFeatures(returnFields, cutoffISO);
