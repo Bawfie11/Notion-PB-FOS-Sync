@@ -119,7 +119,7 @@ function calculateManualCutoffISO() {
     return new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
   }
 
-  const lookbackDays = Number(process.env.PB_UPDATED_LOOKBACK_DAYS || 7);
+  const lookbackDays = Number(process.env.PB_UPDATED_LOOKBACK_DAYS || 30);
 
   if (!Number.isFinite(lookbackDays) || lookbackDays <= 0) {
     throw new Error(`PB_UPDATED_LOOKBACK_DAYS must be a positive number. Received: ${process.env.PB_UPDATED_LOOKBACK_DAYS}`);
