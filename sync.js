@@ -14,6 +14,7 @@ const PB_API_BASE = "https://api.productboard.com/v2";
 const PB_TOKEN = process.env.PRODUCTBOARD_TOKEN;
 const ROADMAP_DATA_SOURCE = process.env.NOTION_ROADMAP_DATA_SOURCE_ID;
 const PRODUCTS_DATA_SOURCE = process.env.NOTION_PRODUCTS_DATA_SOURCE_ID;
+const INITIATIVES_DATA_SOURCE = process.env.NOTION_INITIATIVES_DATA_SOURCE_ID;
 
 const ROADMAP_COMPONENT_TEXT_COL = "Component";
 const ROADMAP_STATUS_COL = "PB Status";
@@ -22,6 +23,10 @@ const TSHIRT_SIZE_COL = "T-Shirt Size";
 const DESIGN_STATUS_COL = "Design Status";
 const DESIGNER_COL = "Designer";
 const PI_FEATURE_COL = "P&I Feature";
+
+const INITIATIVE_NAME_COL = "Initiative Name";
+const INITIATIVE_STATUS_COL = "Initiative Status";
+const INITIATIVE_TIMELINE_COL = "Timeline";
 
 const TEAMS_WEBHOOK_URL =
   process.env.TEAMS_WEBHOOK_URL || process.env["TEAMS-WEBHOOK-URL"];
@@ -350,7 +355,7 @@ async function validateNotionSchema() {
     "App approval",
     "Feature Flag",
     "AI Feature",
-   TSHIRT_SIZE_COL,
+    TSHIRT_SIZE_COL,
     DESIGN_STATUS_COL,
     DESIGNER_COL,
     PI_FEATURE_COL,
@@ -744,7 +749,7 @@ async function getFeatureConfigAndCustomFieldIds() {
       process.env.PB_CUSTOM_FIELD_T_SHIRT_SIZE_ID ||
       ""
     ).trim(),
-designStatus: (process.env.PB_CUSTOM_FIELD_DESIGN_STATUS_ID || "").trim(),
+    designStatus: (process.env.PB_CUSTOM_FIELD_DESIGN_STATUS_ID || "").trim(),
     designer: (process.env.PB_CUSTOM_FIELD_DESIGNER_ID || "").trim(),
     piFeature: (process.env.PB_CUSTOM_FIELD_PI_FEATURE_ID || "").trim()
   };
@@ -770,7 +775,7 @@ designStatus: (process.env.PB_CUSTOM_FIELD_DESIGN_STATUS_ID || "").trim(),
     featureFlag: envIds.featureFlag || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.featureFlag),
     aiFeature: envIds.aiFeature || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.aiFeature),
     tshirtSize: envIds.tshirtSize || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.tshirtSize),
-designStatus: envIds.designStatus || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.designStatus),
+    designStatus: envIds.designStatus || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.designStatus),
     designer: envIds.designer || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.designer),
     piFeature: envIds.piFeature || findFieldIdByDisplayName(config, CUSTOM_FIELD_NAMES.piFeature)
   };
@@ -976,7 +981,7 @@ function isDifferent(newProps, oldProps, featureName) {
     logs.push(`${TSHIRT_SIZE_COL}: "${oldTshirtSize}" -> "${newTshirtSize}"`);
   }
 
- const newDesignStatus = newProps[DESIGN_STATUS_COL]?.select?.name || null;
+  const newDesignStatus = newProps[DESIGN_STATUS_COL]?.select?.name || null;
   const oldDesignStatus = oldProps[DESIGN_STATUS_COL]?.select?.name || null;
   if (newDesignStatus !== oldDesignStatus) {
     logs.push(`${DESIGN_STATUS_COL}: "${oldDesignStatus}" -> "${newDesignStatus}"`);
@@ -1144,7 +1149,7 @@ async function buildNotionPropertiesFromPBFeature(entity, context) {
     ? { select: { name: tshirtSizeVal } }
     : { select: null };
 
-const designStatusVal = selectDisplayValue(fields[fieldIds.designStatus]);
+  const designStatusVal = selectDisplayValue(fields[fieldIds.designStatus]);
   properties[DESIGN_STATUS_COL] = designStatusVal
     ? { select: { name: designStatusVal } }
     : { select: null };
@@ -1192,6 +1197,229 @@ const designStatusVal = selectDisplayValue(fields[fieldIds.designStatus]);
   return { pbId, name, properties };
 }
 
+async function validateInitiativesNotionSchema() {
+  if (!INITIATIVES_DATA_SOURCE) {
+    console.log("NOTION_INITIATIVES_DATA_SOURCE_ID not set. Skipping initiatives sync.");
+    return false;
+  }
+
+  const json = await fetchJsonWithRetry(
+    `https://api.notion.com/v1/data_sources/${INITIATIVES_DATA_SOURCE}`,
+    { method: "GET", headers: notionHeaders() },
+    "Notion initiatives schema validation"
+  );
+
+  const existingColumns = Object.keys(json.properties || {});
+
+  const requiredColumns = [
+    INITIATIVE_NAME_COL,
+    INITIATIVE_STATUS_COL,
+    INITIATIVE_TIMELINE_COL,
+    "PBID"
+  ];
+
+  const missingColumns = requiredColumns.filter(col => !existingColumns.includes(col));
+
+  if (missingColumns.length > 0) {
+    const msg = `The Initiatives Notion DB is missing columns:\n\n${missingColumns.join("\n")}\n\nInitiatives sync skipped.`;
+    console.error("Initiatives schema validation failed:", missingColumns);
+    await sendTeamsAlert("Initiatives Schema Mismatch - Skipped", msg);
+    return false;
+  }
+
+  const expectedTypes = {
+    [INITIATIVE_NAME_COL]: "title",
+    [INITIATIVE_STATUS_COL]: "select",
+    [INITIATIVE_TIMELINE_COL]: "date",
+    "PBID": "rich_text"
+  };
+
+  const typeMismatches = Object.entries(expectedTypes)
+    .filter(([col, expectedType]) => json.properties[col]?.type !== expectedType)
+    .map(([col, expectedType]) => `${col}: expected ${expectedType}, found ${json.properties[col]?.type || "missing"}`);
+
+  if (typeMismatches.length > 0) {
+    const msg = `Initiatives Notion DB column types are wrong:\n\n${typeMismatches.join("\n")}\n\nInitiatives sync skipped.`;
+    console.error("Initiatives schema type validation failed:", typeMismatches);
+    await sendTeamsAlert("Initiatives Schema Type Mismatch - Skipped", msg);
+    return false;
+  }
+
+  console.log("Initiatives Notion schema validation passed.");
+  return true;
+}
+
+function buildInitiativeNotionProperties(entity) {
+  const fields = entity.fields || {};
+  const pbId = entity.id;
+  const name = sanitizeTitle(selectDisplayValue(fields.name) || "");
+
+  const timeframe = fields.timeframe?.value || fields.timeframe || null;
+  let start = timeframe?.startDate || null;
+  let end = timeframe?.endDate || null;
+
+  if (start === "none") start = null;
+  if (end === "none") end = null;
+
+  let dateObj = null;
+  if (start || end) {
+    dateObj = { start: start || end };
+    if (start && end && start !== end) dateObj.end = end;
+  }
+
+  const status = fields.status?.name || selectDisplayValue(fields.status);
+
+  const properties = {
+    [INITIATIVE_NAME_COL]: { title: [{ text: { content: name } }] },
+    PBID: { rich_text: [{ text: { content: pbId } }] },
+    [INITIATIVE_TIMELINE_COL]: { date: dateObj },
+    [INITIATIVE_STATUS_COL]: status
+      ? { select: { name: status } }
+      : { select: null }
+  };
+
+  return { pbId, name, properties };
+}
+
+function isInitiativeDifferent(newProps, oldProps, initiativeName) {
+  const logs = [];
+
+  const newTitle = newProps[INITIATIVE_NAME_COL]?.title?.[0]?.text?.content || "";
+  const oldTitle = oldProps[INITIATIVE_NAME_COL]?.title?.[0]?.plain_text || "";
+  if (newTitle !== oldTitle) logs.push(`Name: "${oldTitle}" -> "${newTitle}"`);
+
+  const newStart = newProps[INITIATIVE_TIMELINE_COL]?.date?.start || null;
+  const newEnd = newProps[INITIATIVE_TIMELINE_COL]?.date?.end || null;
+  const oldStart = oldProps[INITIATIVE_TIMELINE_COL]?.date?.start || null;
+  const oldEnd = oldProps[INITIATIVE_TIMELINE_COL]?.date?.end || null;
+  if (newStart !== oldStart || newEnd !== oldEnd) {
+    logs.push(`Timeline: [${oldStart} to ${oldEnd}] -> [${newStart} to ${newEnd}]`);
+  }
+
+  const newStatus = newProps[INITIATIVE_STATUS_COL]?.select?.name || null;
+  const oldStatus = oldProps[INITIATIVE_STATUS_COL]?.select?.name || null;
+  if (newStatus !== oldStatus) logs.push(`Status: "${oldStatus}" -> "${newStatus}"`);
+
+  if (logs.length > 0) {
+    console.log(`\nINITIATIVE DIFF FOR "${initiativeName}":`);
+    logs.forEach(l => console.log(`   - ${l}`));
+    return true;
+  }
+
+  return false;
+}
+
+async function syncInitiatives() {
+  console.log("\n--- Starting Initiatives sync ---");
+
+  const schemaOk = await validateInitiativesNotionSchema();
+  if (!schemaOk) return;
+
+  const pbInitiatives = await fetchAllPBV2Get(
+    "/entities",
+    {
+      "type[]": ["initiative"],
+      "fields[]": ["name", "status", "timeframe"]
+    },
+    "PB initiatives"
+  );
+
+  console.log(`Fetched ${pbInitiatives.length} PB initiatives.`);
+
+  if (pbInitiatives.length === 0) {
+    console.log("No initiatives returned from Productboard. Skipping.");
+    return;
+  }
+
+  const existingNotionInitiatives = await fetchAllStandardNotionDataSource(INITIATIVES_DATA_SOURCE);
+  const existingByPbId = {};
+
+  existingNotionInitiatives.forEach(page => {
+    const pbId = page.properties.PBID?.rich_text?.[0]?.plain_text;
+    if (pbId) existingByPbId[pbId] = page;
+  });
+
+  let created = 0;
+  let updated = 0;
+  let skipped = 0;
+  let errors = 0;
+  let wouldCreate = 0;
+  let wouldUpdate = 0;
+
+  for (const entity of pbInitiatives) {
+    const { pbId, name, properties } = buildInitiativeNotionProperties(entity);
+    const existingPage = existingByPbId[pbId];
+
+    try {
+      if (existingPage) {
+        if (isInitiativeDifferent(properties, existingPage.properties, name)) {
+          if (DRY_RUN) {
+            console.log(`DRY RUN - would update initiative: ${name}`);
+            wouldUpdate++;
+          } else {
+            await delay(350);
+            await notion.pages.update({
+              page_id: existingPage.id,
+              properties
+            });
+            console.log(`Updated initiative: ${name}`);
+            updated++;
+          }
+        } else {
+          skipped++;
+        }
+      } else {
+        if (!ALLOW_CREATES) {
+          console.warn(`Create blocked by ALLOW_CREATES=false for initiative: ${name} (${pbId})`);
+          wouldCreate++;
+          continue;
+        }
+
+        if (DRY_RUN) {
+          console.log(`DRY RUN - would create initiative: ${name} (${pbId})`);
+          wouldCreate++;
+          continue;
+        }
+
+        await delay(350);
+        await notion.pages.create({
+          parent: { data_source_id: INITIATIVES_DATA_SOURCE },
+          properties
+        });
+        console.log(`Created initiative: ${name}`);
+        created++;
+      }
+    } catch (err) {
+      console.error(`\nINITIATIVE SYNC FAILED: "${name}" (${pbId})`);
+      console.error("Payload Notion rejected:");
+      console.error(JSON.stringify(properties, null, 2));
+      console.error(`Error: ${err.message}\n`);
+      errors++;
+
+      if (errors <= 3) {
+        await sendTeamsAlert(
+          "Initiative Sync Failed",
+          `Initiative: "${name}"\nPBID: ${pbId}\nError: ${err.message}`
+        );
+      }
+    }
+  }
+
+  console.log("--- INITIATIVES SYNC COMPLETE ---");
+  console.log(`Created: ${created} | Updated: ${updated} | Skipped: ${skipped} | Errors: ${errors}`);
+
+  if (DRY_RUN || !ALLOW_CREATES) {
+    console.log(`Would create: ${wouldCreate} | Would update: ${wouldUpdate}`);
+  }
+
+  if (errors > 0) {
+    await sendTeamsAlert(
+      "Initiatives Sync Completed With Errors",
+      `${errors} initiative(s) failed.\nCreated: ${created} | Updated: ${updated} | Skipped: ${skipped}`
+    );
+  }
+}
+
 async function main() {
   console.log("Starting manual FacilityOS Productboard v2 -> Notion sync...");
 
@@ -1236,6 +1464,7 @@ async function main() {
   if (pbFeatures.length === 0) {
     console.log("--- SYNC COMPLETE ---");
     console.log("No Productboard features matched this run.");
+    await syncInitiatives();
     return;
   }
 
@@ -1373,6 +1602,8 @@ async function main() {
       `${errorCount} feature(s) failed to sync.\n\nCreated: ${createdCount} | Updated: ${updatedCount} | Skipped: ${skippedCount}`
     );
   }
+
+  await syncInitiatives();
 }
 
 main().catch(async (err) => {
