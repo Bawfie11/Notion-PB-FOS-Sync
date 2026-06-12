@@ -1,0 +1,37 @@
+name: Productboard to Notion Initiatives Sync
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: pb-notion-initiatives-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run initiatives sync
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          PRODUCTBOARD_TOKEN: ${{ secrets.PRODUCTBOARD_TOKEN }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          NOTION_INITIATIVES_DATA_SOURCE_ID: ${{ secrets.NOTION_INITIATIVES_DATA_SOURCE_ID }}
+
+          DRY_RUN: "false"
+          ALLOW_CREATES: "true"
+
+        run: node initiatives.js
