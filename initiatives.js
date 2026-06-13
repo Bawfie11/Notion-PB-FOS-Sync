@@ -496,4 +496,94 @@ async function main() {
 
   let created = 0;
   let updated = 0;
-  let skipped =
+  let skipped = 0;
+  let errors = 0;
+  let wouldCreate = 0;
+  let wouldUpdate = 0;
+
+  for (const entity of pbInitiatives) {
+    const { pbId, name, properties } = await buildInitiativeNotionProperties(entity, {
+      notionProductMap,
+      pbProductMap
+    });
+
+    const existingPage = existingByPbId[pbId];
+
+    try {
+      if (existingPage) {
+        if (isInitiativeDifferent(properties, existingPage.properties, name)) {
+          if (DRY_RUN) {
+            console.log(`DRY RUN - would update: ${name}`);
+            wouldUpdate++;
+          } else {
+            await delay(350);
+            await notion.pages.update({
+              page_id: existingPage.id,
+              properties
+            });
+            console.log(`Updated: ${name}`);
+            updated++;
+          }
+        } else {
+          skipped++;
+        }
+      } else {
+        if (!ALLOW_CREATES) {
+          console.warn(`Create blocked by ALLOW_CREATES=false: ${name} (${pbId})`);
+          wouldCreate++;
+          continue;
+        }
+
+        if (DRY_RUN) {
+          console.log(`DRY RUN - would create: ${name} (${pbId})`);
+          wouldCreate++;
+          continue;
+        }
+
+        await delay(350);
+        await notion.pages.create({
+          parent: { data_source_id: INITIATIVES_DATA_SOURCE },
+          properties
+        });
+        console.log(`Created: ${name}`);
+        created++;
+      }
+    } catch (err) {
+      console.error(`\nINITIATIVE SYNC FAILED: "${name}" (${pbId})`);
+      console.error("Payload Notion rejected:");
+      console.error(JSON.stringify(properties, null, 2));
+      console.error(`Error: ${err.message}\n`);
+      errors++;
+
+      if (errors <= 3) {
+        await sendTeamsAlert(
+          "Initiative Sync Failed",
+          `Initiative: "${name}"\nPBID: ${pbId}\nError: ${err.message}`
+        );
+      }
+    }
+  }
+
+  console.log("--- INITIATIVES SYNC COMPLETE ---");
+  console.log(`Created: ${created} | Updated: ${updated} | Skipped: ${skipped} | Errors: ${errors}`);
+
+  if (DRY_RUN || !ALLOW_CREATES) {
+    console.log(`Would create: ${wouldCreate} | Would update: ${wouldUpdate}`);
+  }
+
+  if (errors > 0) {
+    await sendTeamsAlert(
+      "Initiatives Sync Completed With Errors",
+      `${errors} initiative(s) failed.\nCreated: ${created} | Updated: ${updated} | Skipped: ${skipped}`
+    );
+  }
+}
+
+main().catch(async (err) => {
+  console.error("Fatal initiatives sync error:", err);
+  await sendTeamsAlert(
+    "Initiatives Sync Crashed",
+    `The initiatives sync crashed.\n\nError: ${err.message}`
+  );
+  process.exit(1);
+});
