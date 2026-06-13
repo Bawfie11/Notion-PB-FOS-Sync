@@ -20,6 +20,8 @@ const INITIATIVE_STATUS_COL = "Initiative Status";
 const INITIATIVE_TIMELINE_COL = "Timeline";
 const INITIATIVE_PRODUCT_COL = "Product";
 
+const INITIATIVE_PRODUCT_FIELD_NAME = "Product";
+
 const TEAMS_WEBHOOK_URL =
   process.env.TEAMS_WEBHOOK_URL || process.env["TEAMS-WEBHOOK-URL"];
 
@@ -243,69 +245,66 @@ function selectDisplayValue(value) {
   return null;
 }
 
-function getRelationships(entity) {
-  const rels = entity?.relationships;
-  if (Array.isArray(rels)) return rels;
-  if (Array.isArray(rels?.data)) return rels.data;
+function normalizeFieldsList(config) {
+  if (!config) return [];
+
+  if (Array.isArray(config.fields)) {
+    return config.fields.map((field, index) => [field.id || field.apiName || String(index), field]);
+  }
+
+  if (config.fields && typeof config.fields === "object") {
+    return Object.entries(config.fields);
+  }
+
+  if (Array.isArray(config.data?.fields)) {
+    return config.data.fields.map((field, index) => [field.id || field.apiName || String(index), field]);
+  }
+
   return [];
 }
 
-function getParentRef(entity) {
-  return getRelationships(entity).find(r => r.type === "parent")?.target || null;
+function findFieldIdByDisplayName(config, displayName) {
+  const fields = normalizeFieldsList(config);
+
+  for (const [key, field] of fields) {
+    const names = [
+      field?.name,
+      field?.displayName,
+      field?.label,
+      field?.apiName
+    ].filter(Boolean);
+
+    if (names.includes(displayName)) {
+      return field.id || field.apiName || key;
+    }
+  }
+
+  return null;
 }
 
-function getEntityName(entity) {
-  return sanitizeTitle(selectDisplayValue(entity?.fields?.name) || "");
-}
+async function getInitiativeProductFieldId() {
+  const envId = (process.env.PB_CUSTOM_FIELD_INITIATIVE_PRODUCT_ID || "").trim();
 
-async function fetchParentRef(entityId) {
-  const relationships = await fetchAllPBV2Get(
-    `/entities/${entityId}/relationships`,
-    { type: "parent" },
-    `PB parent relationship ${entityId}`
-  );
+  if (envId) {
+    console.log("Using PB initiative Product custom field ID from env.");
+    return envId;
+  }
 
-  return relationships.find(r => r.type === "parent")?.target || null;
-}
-
-async function fetchEntityById(id, fields = ["name"]) {
   const json = await pbGet(
-    `/entities/${id}`,
-    { "fields[]": fields },
-    `PB entity ${id}`
+    "/entities/configurations/initiative",
+    {},
+    "PB initiative configuration"
   );
 
-  return json.data;
-}
+  const config = json.data || json;
+  const fieldId = findFieldIdByDisplayName(config, INITIATIVE_PRODUCT_FIELD_NAME);
 
-async function getPBProductMap() {
-  const products = await fetchAllPBV2Get(
-    "/entities",
-    {
-      "type[]": ["product"],
-      "fields[]": ["name"]
-    },
-    "PB products"
-  );
-
-  const productMap = {};
-  for (const entity of products) {
-    productMap[entity.id] = getEntityName(entity);
+  if (!fieldId) {
+    throw new Error(`Could not find Productboard custom field "${INITIATIVE_PRODUCT_FIELD_NAME}" on initiative configuration.`);
   }
 
-  return productMap;
-}
-
-async function ensurePBProductName(productId, productMap) {
-  if (!productId || productMap[productId]) return;
-
-  try {
-    const productEntity = await fetchEntityById(productId, ["name"]);
-    productMap[productId] = getEntityName(productEntity);
-  } catch (e) {
-    console.warn(`Could not fetch PB product ${productId}: ${e.message}`);
-    productMap[productId] = "";
-  }
+  console.log(`Discovered PB initiative Product custom field ID: ${fieldId}`);
+  return fieldId;
 }
 
 async function validateInitiativesNotionSchema() {
@@ -356,8 +355,8 @@ async function validateInitiativesNotionSchema() {
   console.log("Initiatives Notion schema validation passed.");
 }
 
-async function buildInitiativeNotionProperties(entity, context) {
-  const { notionProductMap, pbProductMap } = context;
+function buildInitiativeNotionProperties(entity, context) {
+  const { notionProductMap, productFieldId } = context;
 
   const fields = entity.fields || {};
   const pbId = entity.id;
@@ -378,22 +377,11 @@ async function buildInitiativeNotionProperties(entity, context) {
 
   const status = fields.status?.name || selectDisplayValue(fields.status);
 
-  let parent = getParentRef(entity);
-  if (!parent) {
-    parent = await fetchParentRef(entity.id);
-  }
+  const productName = selectDisplayValue(fields[productFieldId]);
+  const notionProductPageId = productName ? notionProductMap[productName] : null;
 
-  const productPbId = parent?.type === "product" ? parent.id : null;
-
-  if (productPbId) {
-    await ensurePBProductName(productPbId, pbProductMap);
-  }
-
-  const pbProductName = productPbId ? (pbProductMap[productPbId] || "") : "";
-  const notionProductPageId = pbProductName ? notionProductMap[pbProductName] : null;
-
-  if (productPbId && !notionProductPageId) {
-    console.warn(`WARNING: Initiative "${name}" links to PB product "${pbProductName}" (id ${productPbId}), but no matching Notion product page was found. Product relation left empty.`);
+  if (productName && !notionProductPageId) {
+    console.warn(`WARNING: Initiative "${name}" links to PB product "${productName}", but no matching Notion product page was found. Product relation left empty.`);
   }
 
   const properties = {
@@ -455,8 +443,7 @@ async function main() {
 
   await validateInitiativesNotionSchema();
 
-  const pbProductMap = await getPBProductMap();
-  console.log(`Loaded ${Object.keys(pbProductMap).length} PB products for relation mapping.`);
+  const productFieldId = await getInitiativeProductFieldId();
 
   const notionProductsRes = await fetchAllStandardNotionDataSource(PRODUCTS_DATA_SOURCE);
   const notionProductMap = {};
@@ -473,7 +460,7 @@ async function main() {
     "/entities",
     {
       "type[]": ["initiative"],
-      "fields[]": ["name", "status", "timeframe"]
+      "fields[]": ["name", "status", "timeframe", productFieldId]
     },
     "PB initiatives"
   );
@@ -502,9 +489,9 @@ async function main() {
   let wouldUpdate = 0;
 
   for (const entity of pbInitiatives) {
-    const { pbId, name, properties } = await buildInitiativeNotionProperties(entity, {
+    const { pbId, name, properties } = buildInitiativeNotionProperties(entity, {
       notionProductMap,
-      pbProductMap
+      productFieldId
     });
 
     const existingPage = existingByPbId[pbId];
