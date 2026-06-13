@@ -13,10 +13,12 @@ const PB_API_BASE = "https://api.productboard.com/v2";
 
 const PB_TOKEN = process.env.PRODUCTBOARD_TOKEN;
 const INITIATIVES_DATA_SOURCE = process.env.NOTION_INITIATIVES_DATA_SOURCE_ID;
+const PRODUCTS_DATA_SOURCE = process.env.NOTION_PRODUCTS_DATA_SOURCE_ID;
 
 const INITIATIVE_NAME_COL = "Initiative Name";
 const INITIATIVE_STATUS_COL = "Initiative Status";
 const INITIATIVE_TIMELINE_COL = "Timeline";
+const INITIATIVE_PRODUCT_COL = "Product";
 
 const TEAMS_WEBHOOK_URL =
   process.env.TEAMS_WEBHOOK_URL || process.env["TEAMS-WEBHOOK-URL"];
@@ -36,7 +38,8 @@ function validateRequiredEnv() {
   const required = [
     "NOTION_TOKEN",
     "PRODUCTBOARD_TOKEN",
-    "NOTION_INITIATIVES_DATA_SOURCE_ID"
+    "NOTION_INITIATIVES_DATA_SOURCE_ID",
+    "NOTION_PRODUCTS_DATA_SOURCE_ID"
   ];
 
   const missing = required.filter(name => !process.env[name]);
@@ -164,6 +167,15 @@ async function fetchJsonWithRetry(url, options = {}, label = "request") {
   throw new Error(`${label} failed unexpectedly`);
 }
 
+async function pbGet(pathOrUrl, params = {}, label = "Productboard GET") {
+  const url = buildPBUrl(pathOrUrl, params);
+  return fetchJsonWithRetry(
+    url,
+    { method: "GET", headers: pbHeaders() },
+    label
+  );
+}
+
 async function fetchAllPBV2Get(pathOrUrl, params = {}, label = "Productboard list") {
   const results = [];
   let nextUrl = buildPBUrl(pathOrUrl, params);
@@ -231,6 +243,71 @@ function selectDisplayValue(value) {
   return null;
 }
 
+function getRelationships(entity) {
+  const rels = entity?.relationships;
+  if (Array.isArray(rels)) return rels;
+  if (Array.isArray(rels?.data)) return rels.data;
+  return [];
+}
+
+function getParentRef(entity) {
+  return getRelationships(entity).find(r => r.type === "parent")?.target || null;
+}
+
+function getEntityName(entity) {
+  return sanitizeTitle(selectDisplayValue(entity?.fields?.name) || "");
+}
+
+async function fetchParentRef(entityId) {
+  const relationships = await fetchAllPBV2Get(
+    `/entities/${entityId}/relationships`,
+    { type: "parent" },
+    `PB parent relationship ${entityId}`
+  );
+
+  return relationships.find(r => r.type === "parent")?.target || null;
+}
+
+async function fetchEntityById(id, fields = ["name"]) {
+  const json = await pbGet(
+    `/entities/${id}`,
+    { "fields[]": fields },
+    `PB entity ${id}`
+  );
+
+  return json.data;
+}
+
+async function getPBProductMap() {
+  const products = await fetchAllPBV2Get(
+    "/entities",
+    {
+      "type[]": ["product"],
+      "fields[]": ["name"]
+    },
+    "PB products"
+  );
+
+  const productMap = {};
+  for (const entity of products) {
+    productMap[entity.id] = getEntityName(entity);
+  }
+
+  return productMap;
+}
+
+async function ensurePBProductName(productId, productMap) {
+  if (!productId || productMap[productId]) return;
+
+  try {
+    const productEntity = await fetchEntityById(productId, ["name"]);
+    productMap[productId] = getEntityName(productEntity);
+  } catch (e) {
+    console.warn(`Could not fetch PB product ${productId}: ${e.message}`);
+    productMap[productId] = "";
+  }
+}
+
 async function validateInitiativesNotionSchema() {
   const json = await fetchJsonWithRetry(
     `https://api.notion.com/v1/data_sources/${INITIATIVES_DATA_SOURCE}`,
@@ -244,6 +321,7 @@ async function validateInitiativesNotionSchema() {
     INITIATIVE_NAME_COL,
     INITIATIVE_STATUS_COL,
     INITIATIVE_TIMELINE_COL,
+    INITIATIVE_PRODUCT_COL,
     "PBID"
   ];
 
@@ -260,6 +338,7 @@ async function validateInitiativesNotionSchema() {
     [INITIATIVE_NAME_COL]: "title",
     [INITIATIVE_STATUS_COL]: "select",
     [INITIATIVE_TIMELINE_COL]: "date",
+    [INITIATIVE_PRODUCT_COL]: "relation",
     "PBID": "rich_text"
   };
 
@@ -277,7 +356,9 @@ async function validateInitiativesNotionSchema() {
   console.log("Initiatives Notion schema validation passed.");
 }
 
-function buildInitiativeNotionProperties(entity) {
+async function buildInitiativeNotionProperties(entity, context) {
+  const { notionProductMap, pbProductMap } = context;
+
   const fields = entity.fields || {};
   const pbId = entity.id;
   const name = sanitizeTitle(selectDisplayValue(fields.name) || "");
@@ -297,13 +378,34 @@ function buildInitiativeNotionProperties(entity) {
 
   const status = fields.status?.name || selectDisplayValue(fields.status);
 
+  let parent = getParentRef(entity);
+  if (!parent) {
+    parent = await fetchParentRef(entity.id);
+  }
+
+  const productPbId = parent?.type === "product" ? parent.id : null;
+
+  if (productPbId) {
+    await ensurePBProductName(productPbId, pbProductMap);
+  }
+
+  const pbProductName = productPbId ? (pbProductMap[productPbId] || "") : "";
+  const notionProductPageId = pbProductName ? notionProductMap[pbProductName] : null;
+
+  if (productPbId && !notionProductPageId) {
+    console.warn(`WARNING: Initiative "${name}" links to PB product "${pbProductName}" (id ${productPbId}), but no matching Notion product page was found. Product relation left empty.`);
+  }
+
   const properties = {
     [INITIATIVE_NAME_COL]: { title: [{ text: { content: name } }] },
     PBID: { rich_text: [{ text: { content: pbId } }] },
     [INITIATIVE_TIMELINE_COL]: { date: dateObj },
     [INITIATIVE_STATUS_COL]: status
       ? { select: { name: status } }
-      : { select: null }
+      : { select: null },
+    [INITIATIVE_PRODUCT_COL]: notionProductPageId
+      ? { relation: [{ id: notionProductPageId }] }
+      : { relation: [] }
   };
 
   return { pbId, name, properties };
@@ -328,6 +430,12 @@ function isInitiativeDifferent(newProps, oldProps, initiativeName) {
   const oldStatus = oldProps[INITIATIVE_STATUS_COL]?.select?.name || null;
   if (newStatus !== oldStatus) logs.push(`Status: "${oldStatus}" -> "${newStatus}"`);
 
+  const newProductId = newProps[INITIATIVE_PRODUCT_COL]?.relation?.[0]?.id || null;
+  const oldProductId = oldProps[INITIATIVE_PRODUCT_COL]?.relation?.[0]?.id || null;
+  if (newProductId !== oldProductId) {
+    logs.push(`Product relation changed`);
+  }
+
   if (logs.length > 0) {
     console.log(`\nINITIATIVE DIFF FOR "${initiativeName}":`);
     logs.forEach(l => console.log(`   - ${l}`));
@@ -346,6 +454,20 @@ async function main() {
   console.log(`ALLOW_CREATES=${ALLOW_CREATES}`);
 
   await validateInitiativesNotionSchema();
+
+  const pbProductMap = await getPBProductMap();
+  console.log(`Loaded ${Object.keys(pbProductMap).length} PB products for relation mapping.`);
+
+  const notionProductsRes = await fetchAllStandardNotionDataSource(PRODUCTS_DATA_SOURCE);
+  const notionProductMap = {};
+
+  notionProductsRes.forEach(page => {
+    const nameProp = page.properties["Product Name"] || page.properties["Name"];
+    const name = nameProp?.title?.[0]?.plain_text;
+    if (name) notionProductMap[name] = page.id;
+  });
+
+  console.log(`Loaded ${Object.keys(notionProductMap).length} Notion products for relation mapping.`);
 
   const pbInitiatives = await fetchAllPBV2Get(
     "/entities",
@@ -374,90 +496,4 @@ async function main() {
 
   let created = 0;
   let updated = 0;
-  let skipped = 0;
-  let errors = 0;
-  let wouldCreate = 0;
-  let wouldUpdate = 0;
-
-  for (const entity of pbInitiatives) {
-    const { pbId, name, properties } = buildInitiativeNotionProperties(entity);
-    const existingPage = existingByPbId[pbId];
-
-    try {
-      if (existingPage) {
-        if (isInitiativeDifferent(properties, existingPage.properties, name)) {
-          if (DRY_RUN) {
-            console.log(`DRY RUN - would update: ${name}`);
-            wouldUpdate++;
-          } else {
-            await delay(350);
-            await notion.pages.update({
-              page_id: existingPage.id,
-              properties
-            });
-            console.log(`Updated: ${name}`);
-            updated++;
-          }
-        } else {
-          skipped++;
-        }
-      } else {
-        if (!ALLOW_CREATES) {
-          console.warn(`Create blocked by ALLOW_CREATES=false: ${name} (${pbId})`);
-          wouldCreate++;
-          continue;
-        }
-
-        if (DRY_RUN) {
-          console.log(`DRY RUN - would create: ${name} (${pbId})`);
-          wouldCreate++;
-          continue;
-        }
-
-        await delay(350);
-        await notion.pages.create({
-          parent: { data_source_id: INITIATIVES_DATA_SOURCE },
-          properties
-        });
-        console.log(`Created: ${name}`);
-        created++;
-      }
-    } catch (err) {
-      console.error(`\nINITIATIVE SYNC FAILED: "${name}" (${pbId})`);
-      console.error("Payload Notion rejected:");
-      console.error(JSON.stringify(properties, null, 2));
-      console.error(`Error: ${err.message}\n`);
-      errors++;
-
-      if (errors <= 3) {
-        await sendTeamsAlert(
-          "Initiative Sync Failed",
-          `Initiative: "${name}"\nPBID: ${pbId}\nError: ${err.message}`
-        );
-      }
-    }
-  }
-
-  console.log("--- INITIATIVES SYNC COMPLETE ---");
-  console.log(`Created: ${created} | Updated: ${updated} | Skipped: ${skipped} | Errors: ${errors}`);
-
-  if (DRY_RUN || !ALLOW_CREATES) {
-    console.log(`Would create: ${wouldCreate} | Would update: ${wouldUpdate}`);
-  }
-
-  if (errors > 0) {
-    await sendTeamsAlert(
-      "Initiatives Sync Completed With Errors",
-      `${errors} initiative(s) failed.\nCreated: ${created} | Updated: ${updated} | Skipped: ${skipped}`
-    );
-  }
-}
-
-main().catch(async (err) => {
-  console.error("Fatal initiatives sync error:", err);
-  await sendTeamsAlert(
-    "Initiatives Sync Crashed",
-    `The initiatives sync crashed.\n\nError: ${err.message}`
-  );
-  process.exit(1);
-});
+  let skipped =
