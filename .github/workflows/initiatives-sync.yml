@@ -30,7 +30,7 @@ jobs:
           PRODUCTBOARD_TOKEN: ${{ secrets.PRODUCTBOARD_TOKEN }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           NOTION_INITIATIVES_DATA_SOURCE_ID: ${{ secrets.NOTION_INITIATIVES_DATA_SOURCE_ID }}
-
+          NOTION_PRODUCTS_DATA_SOURCE_ID: ${{ secrets.NOTION_PRODUCTS_DATA_SOURCE_ID }}
           DRY_RUN: "false"
           ALLOW_CREATES: "true"
 
